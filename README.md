@@ -19,7 +19,7 @@ add dst-address=10.199.0.15 src-address=10.199.15.9 version=ipfix
 ## Exclusiones
 
 ```sql
-INSERT INTO ddos_whitelist_nets VALUES ('82.97.205.0/24', 'G-Core Labs S.A.');
+INSERT INTO ddos_whitelist_nets VALUES ('34.124.0.0/14', 'ROBLOX');
 ```
 
 ```sql

@@ -4,9 +4,13 @@ WITH
         SELECT
             src_ip,
             count() as minutos_activos
-        FROM default.flow_stats_1m
-        WHERE window_start >= now() - INTERVAL 10 MINUTE
-          AND (sum_packets / 60) > 1000 
+        FROM (
+            SELECT src_ip, window_start, sum(sum_packets) as total_packets_minuto
+            FROM flow_stats_1m
+            WHERE window_start >= now() - INTERVAL 30 MINUTE
+            GROUP BY src_ip, window_start
+            HAVING (total_packets_minuto / 60) > 1000
+        )
         GROUP BY src_ip
     ),
     current_traffic AS (
@@ -16,8 +20,8 @@ WITH
             total_packets / 10 as current_pps,
             total_bytes * 8 / 10 as current_bps,
             (total_bytes / total_packets) as avg_pkt_size
-        FROM default.flow_metrics_10s
-        WHERE window_start >= now() - INTERVAL 3 MINUTE
+        FROM flow_metrics_10s
+        WHERE window_start >= now() - INTERVAL 60 MINUTE
         ORDER BY window_start DESC
         LIMIT 1 BY src_ip 
     )
@@ -25,23 +29,24 @@ WITH
 SELECT
     curr.src_ip,
     curr.current_pps,
-    curr.current_bps, -- Columna necesaria para el script Python
+    curr.current_bps,
     curr.avg_pkt_size as tamano_paquete,
     coalesce(hist.minutos_activos, 0) as persistencia_minutos,
+    dateDiff('second', curr.window_start, now()) as lag_segundos,
+    
+    -- 🚩 Bandera para saber si la IP es nuestra (1) o externa (0)
+    dictHas('dict_protected_nets', curr.src_ip) as is_internal,
 
     CASE 
-        -- 1. Whitelist de IPs Individuales
-        WHEN curr.src_ip IN (SELECT ip FROM default.ddos_whitelist) THEN 'Ignored_Whitelist_IP'
+        -- Solo ignoramos Whitelist EXPLICITA (Google, DNS, etc)
+        WHEN curr.src_ip IN (SELECT ip FROM ddos_whitelist) THEN 'Ignored_Whitelist_IP'
+        WHEN dictHas('dict_whitelist_nets', curr.src_ip) = 1 THEN 'Ignored_Whitelist_Net'
         
-        -- 2. Whitelist de REDES (Activa) 🛡️
-        -- Verifica si la IP pertenece a algún CIDR del diccionario
-        WHEN dictHas('default.dict_whitelist_nets', curr.src_ip) = 1 THEN 'Ignored_Whitelist_Net'
+        -- YA NO IGNORAMOS REDES INTERNAS. Si es interna y ataca, caerá aquí abajo 👇
         
-        -- 3. Ataques Críticos
         WHEN hist.minutos_activos >= 3 THEN 'Critical_Constant_Attack'
         WHEN curr.avg_pkt_size < 40 AND curr.current_pps > 1000 THEN 'Critical_Null_Packet_Flood'
         WHEN curr.current_pps > 50000 THEN 'Critical_Volumetric_Burst'
-        WHEN curr.current_pps > 5000 AND curr.avg_pkt_size < 100 THEN 'Warning_Small_Packet_Flood'
         
         ELSE 'Normal'
     END AS status
