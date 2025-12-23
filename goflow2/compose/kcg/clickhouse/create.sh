@@ -123,7 +123,8 @@ clickhouse client -n <<-EOSQL
         count UInt64
     ) ENGINE = SummingMergeTree()
     PARTITION BY date
-    ORDER BY (date, timeslot, src_as, dst_as, \`etypeMap.etype\`);
+    ORDER BY (date, timeslot, src_as, dst_as, \`etypeMap.etype\`)
+    TTL date + INTERVAL 1 DAY;
 
     CREATE MATERIALIZED VIEW IF NOT EXISTS flows_5m_view TO flows_5m
     AS
