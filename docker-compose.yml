@@ -1,0 +1,7 @@
+services:
+  tabix:
+    image: spoonest/clickhouse-tabix-web-client:latest
+    container_name: tabix
+    #restart: always
+    ports:
+      - "8081:80"
