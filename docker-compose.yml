@@ -5,3 +5,4 @@ services:
     #restart: always
     ports:
       - "8081:80"
+    restart: always

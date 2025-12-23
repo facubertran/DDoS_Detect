@@ -19,10 +19,7 @@ services:
       - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
       - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
       - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
-      - KAFKA_LOG_DIRS=/var/lib/kafka/data
     restart: always
-    volumes:
-      - kafka_data:/var/lib/kafka/data
   grafana:
     image: grafana/grafana:12.1
     environment:
@@ -72,7 +69,6 @@ services:
       - 8123:8123
     restart: always
     volumes:
-      - clickhouse_data:/var/lib/clickhouse
       - ./clickhouse:/docker-entrypoint-initdb.d/
       #- ../../pb/flow.proto:/var/lib/clickhouse/format_schemas/flow.proto
       # the following files have 101:101 as owner
@@ -80,18 +76,3 @@ services:
       - ./clickhouse/protocols.csv:/var/lib/clickhouse/user_files/protocols.csv
     depends_on:
       - kafka
-
-volumes:
-  clickhouse_data:
-    driver: local
-    driver_opts:
-      type: none
-      device: /mnt/flows
-      o: bind
-
-  kafka_data:
-    driver: local
-    driver_opts:
-      type: none
-      device: /mnt/kafka
-      o: bind

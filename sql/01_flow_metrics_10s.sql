@@ -15,4 +15,4 @@ CREATE TABLE IF NOT EXISTS default.flow_metrics_10s (
 ENGINE = AggregatingMergeTree()
 PARTITION BY toYYYYMMDD(window_start)
 ORDER BY (window_start, src_ip)
-TTL window_start + INTERVAL 1 WEEK;
+TTL window_start + INTERVAL 1 WEEK

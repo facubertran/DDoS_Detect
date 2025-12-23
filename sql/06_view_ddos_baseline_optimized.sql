@@ -1,27 +1,14 @@
 CREATE VIEW view_ddos_baseline_optimized AS
 WITH 
-    -- 1. BASELINE CORTO (1 Hora)
-    short_term AS (
-        SELECT 
+    history_check AS (
+        SELECT
             src_ip,
-            avg(sum_packets) / 60 as avg_pps,
-            stddevPop(sum_packets / 60) as std_pps
-        FROM flow_stats_1m
-        WHERE window_start BETWEEN (now() - INTERVAL 1 HOUR) AND (now() - INTERVAL 1 MINUTE)
+            count() as minutos_activos
+        FROM default.flow_stats_1m
+        WHERE window_start >= now() - INTERVAL 10 MINUTE
+          AND (sum_packets / 60) > 1000 
         GROUP BY src_ip
     ),
-    
-    -- 2. BASELINE LARGO (7 Días - Percentil 99)
-    long_term AS (
-        SELECT 
-            src_ip,
-            quantile(0.99)(sum_packets) / 60 as p99_pps_weekly
-        FROM flow_stats_1m
-        WHERE window_start >= now() - INTERVAL 7 DAY
-        GROUP BY src_ip
-    ),
-
-    -- 3. TRÁFICO ACTUAL
     current_traffic AS (
         SELECT
             src_ip,
@@ -29,35 +16,40 @@ WITH
             total_packets / 10 as current_pps,
             total_bytes * 8 / 10 as current_bps,
             (total_bytes / total_packets) as avg_pkt_size
-        FROM flow_metrics_10s
-        WHERE window_start >= now() - INTERVAL 20 SECOND
+        FROM default.flow_metrics_10s
+        WHERE window_start >= now() - INTERVAL 3 MINUTE
+        ORDER BY window_start DESC
+        LIMIT 1 BY src_ip 
     )
 
 SELECT
-    -- AQUI ESTÁ EL CAMBIO: Usamos "AS nombre" explícitamente
-    curr.src_ip AS src_ip,
-    curr.current_pps AS current_pps,
-    short.avg_pps AS avg_pps,
-    curr.current_bps AS current_bps,
-    
-    round(long.p99_pps_weekly) AS techo_semanal_limpio,
-    
-    (curr.current_pps - short.avg_pps) / NULLIF(short.std_pps + 1, 0) AS z_score,
-    
+    curr.src_ip,
+    curr.current_pps,
+    curr.current_bps, -- Columna necesaria para el script Python
+    curr.avg_pkt_size as tamano_paquete,
+    coalesce(hist.minutos_activos, 0) as persistencia_minutos,
+
     CASE 
-        WHEN curr.current_pps > 50000 THEN 'Critical_Volumetric_Flood'
-        WHEN curr.avg_pkt_size < 85 THEN 'Ignored_Small_Packet_ACK'
-        WHEN curr.current_pps < (long.p99_pps_weekly * 1.5) THEN 'Ignored_Inside_Weekly_Range'
-        WHEN z_score > 6 THEN 'Critical_Anomaly'
-        WHEN z_score > 4 THEN 'Warning_Anomaly'
+        -- 1. Whitelist de IPs Individuales
+        WHEN curr.src_ip IN (SELECT ip FROM default.ddos_whitelist) THEN 'Ignored_Whitelist_IP'
+        
+        -- 2. Whitelist de REDES (Activa) 🛡️
+        -- Verifica si la IP pertenece a algún CIDR del diccionario
+        WHEN dictHas('default.dict_whitelist_nets', curr.src_ip) = 1 THEN 'Ignored_Whitelist_Net'
+        
+        -- 3. Ataques Críticos
+        WHEN hist.minutos_activos >= 3 THEN 'Critical_Constant_Attack'
+        WHEN curr.avg_pkt_size < 40 AND curr.current_pps > 1000 THEN 'Critical_Null_Packet_Flood'
+        WHEN curr.current_pps > 50000 THEN 'Critical_Volumetric_Burst'
+        WHEN curr.current_pps > 5000 AND curr.avg_pkt_size < 100 THEN 'Warning_Small_Packet_Flood'
+        
         ELSE 'Normal'
     END AS status
 
 FROM current_traffic curr
-INNER JOIN short_term short ON curr.src_ip = short.src_ip
-LEFT JOIN long_term long ON curr.src_ip = long.src_ip
+LEFT JOIN history_check hist ON curr.src_ip = hist.src_ip
 
 WHERE 
-    curr.current_pps > 30000 
-    AND status IN ('Critical_Anomaly', 'Warning_Anomaly', 'Critical_Volumetric_Flood')
-ORDER BY z_score DESC;
+    curr.current_pps > 1000
+    AND (status LIKE 'Critical%' OR status LIKE 'Warning%')
+ORDER BY curr.current_pps DESC;

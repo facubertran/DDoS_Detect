@@ -3,160 +3,194 @@ import requests
 import json
 from datetime import datetime
 
-# ================= CONFIGURACIÓN =================
-# 1. Datos de ClickHouse (HTTP Interface)
-DB_HOST = 'localhost' # O tu IP
-DB_PORT = 8123        # Puerto HTTP
-DB_USER = 'default'
-DB_PASSWORD = 'flow'      # Tu password
+# ==========================================
+# ⚙️ CONFIGURACIÓN
+# ==========================================
 
-# 2. Datos de Telegram
-TG_BOT_TOKEN = '514803369:AAErDsxXMB4FcHSmlJQYdaHVzAUHdXwVQ9Q' 
-TG_CHAT_ID = '-1001595461363' 
+# 1. ClickHouse HTTP API
+CH_HOST = 'http://localhost:8123'
+CH_USER = 'default'
+CH_PASSWORD = 'flow'
+CH_DB = 'default'
 
-# 3. Ajustes de Detección
-CHECK_INTERVAL = 10     
-ALERT_COOLDOWN = 600    
-MIN_ROUNDS = 3          
+# 2. Telegram Bot
+TELEGRAM_TOKEN = '514803369:AAErDsxXMB4FcHSmlJQYdaHVzAUHdXwVQ9Q'
+TELEGRAM_CHAT_ID = '-1001595461363'
 
-# =================================================
+# 3. Ajustes del Monitor
+CHECK_INTERVAL = 5       # Segundos entre cada consulta
+COOLDOWN_SECONDS = 60    # Tiempo para declarar fin del ataque
+MIN_STREAK = 3           # 🟢 NUEVO: Veces consecutivas requeridas para alertar
 
-alert_history = {}
+# ==========================================
+# 🧠 LÓGICA DEL SISTEMA
+# ==========================================
 
-def send_telegram_alert(message):
-    """Envía mensaje a Telegram usando HTML (Más robusto)"""
-    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-    payload = {
-        'chat_id': TG_CHAT_ID,
-        'text': message,
-        'parse_mode': 'HTML'  # <--- CAMBIO IMPORTANTE: Usamos HTML
-    }
+# Diccionario para ataques confirmados (ya alertados)
+active_attacks = {}
+
+# 🟢 NUEVO: Diccionario para candidatos (IPs en observación)
+# Estructura: { 'IP': count }
+pending_attacks = {}
+
+def send_telegram_msg(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
     try:
-        r = requests.post(url, data=payload, timeout=5)
-        r.raise_for_status()
-        print(f"✅ [TELEGRAM] Mensaje enviado correctamente.")
-    except requests.exceptions.HTTPError as err:
-        # Imprimimos el error exacto si vuelve a fallar
-        print(f"❌ [TELEGRAM API ERROR] {r.text}")
+        requests.post(url, data=data, timeout=5)
     except Exception as e:
-        print(f"❌ [TELEGRAM ERROR CONEXIÓN] {e}")
+        print(f"Error Telegram: {e}")
 
-def ch_query(query, readonly=True):
+def format_bps(size):
+    power = 2**10
+    n = size
+    power_labels = {0 : '', 1: 'K', 2: 'M', 3: 'G', 4: 'T'}
+    count = 0
+    while n > power:
+        n /= power
+        count += 1
+    return f"{n:.1f} {power_labels[count]}bps"
+
+def get_current_attacks_http():
+    # Mantenemos tus filtros estrictos del paso anterior
+    query = """
+    SELECT 
+        src_ip, 
+        current_pps, 
+        current_bps, 
+        tamano_paquete, 
+        persistencia_minutos, 
+        status 
+    FROM view_ddos_baseline_optimized
+    WHERE 
+        (status = 'Critical_Constant_Attack' OR status = 'Critical_Null_Packet_Flood')
+        AND current_pps > 20000
+        AND persistencia_minutos > 3
+    FORMAT JSONCompact
     """
-    Ejecuta consultas a ClickHouse vía HTTP (Puerto 8123).
-    Si readonly=True, espera datos de retorno (SELECT).
-    Si readonly=False, solo ejecuta (INSERT).
-    """
-    url = f"http://{DB_HOST}:{DB_PORT}/"
     
-    # Si es un SELECT, pedimos formato JSONCompact para parsear fácil en Python
-    if readonly:
-        query += " FORMAT JSONCompact"
-    
-    params = {
-        'user': DB_USER,
-        'password': DB_PASSWORD,
-        'query': query
-    }
-    
+    params = {'database': CH_DB, 'query': query}
+    auth = (CH_USER, CH_PASSWORD) if CH_PASSWORD else None
+
     try:
-        r = requests.post(url, params=params, timeout=10)
-        r.raise_for_status() # Lanza error si HTTP != 200
-        
-        if readonly:
-            return r.json().get('data', [])
+        response = requests.post(CH_HOST, params=params, auth=auth, timeout=10)
+        if response.status_code == 200:
+            return response.json().get('data', [])
+        else:
+            print(f"Error ClickHouse: {response.text}")
+            return []
+    except Exception as e:
+        print(f"Error Conexión: {e}")
         return []
-        
-    except Exception as e:
-        print(f"[ERROR DB] Falló consulta HTTP: {e}")
-        # Si hay error en el body (ej. error de sintaxis SQL), lo imprimimos
-        if 'r' in locals() and r.text:
-             print(f"[DB MESSAGE] {r.text.strip()}")
-        raise e
 
 def main():
-    print(f"--- INICIANDO MONITOR ANTI-DDOS (Modo HTTP Puerto {DB_PORT}) ---")
-    
+    print(f"🛡️  Monitor Anti-DDoS Iniciado (Requiere {MIN_STREAK} detecciones consecutivas)...")
+
     while True:
         try:
-            start_time = time.time()
-
-            # ---------------------------------------------------------
-            # PASO A: REGISTRAR (Insertar estado actual en el Log)
-            # ---------------------------------------------------------
-            sql_insert = """
-                INSERT INTO default.ddos_events_log
-                SELECT 
-                    now(), src_ip, current_pps, current_bps, z_score, status
-                FROM default.view_ddos_baseline_optimized
-                WHERE status != 'Normal'
-            """
-            # Ejecutamos sin esperar retorno
-            ch_query(sql_insert, readonly=False)
-
-            # ---------------------------------------------------------
-            # PASO B: CONFIRMAR (Buscar persistencia)
-            # ---------------------------------------------------------
-            sql_check = f"""
-                SELECT 
-                    src_ip, 
-                    count() as apariciones,
-                    max(pps) as max_pps,
-                    formatReadableSize(max(bps)) as max_bw,
-                    argMax(status, pps) as tipo_ataque
-                FROM default.ddos_events_log
-                WHERE event_time >= now() - INTERVAL 1 MINUTE
-                GROUP BY src_ip
-                HAVING apariciones >= {MIN_ROUNDS}
-            """
+            rows = get_current_attacks_http()
             
-            # Ejecutamos esperando retorno
-            results = ch_query(sql_check, readonly=True)
+            # Conjunto de IPs detectadas en ESTA vuelta específica
+            current_cycle_ips = set()
 
-            # ---------------------------------------------------------
-            # PASO C: GESTIÓN DE ALERTAS
-            # ---------------------------------------------------------
-            current_ts = time.time()
-            
-            for row in results:
-                # En JSONCompact, row es una lista simple: [ip, apariciones, max_pps, ...]
-                ip_address = row[0]
-                hits = row[1]
-                max_pps = row[2]
-                max_bw = row[3]
-                attack_type = row[4]
+            for row in rows:
+                ip = row[0]
+                pps = float(row[1])
+                bps = float(row[2])
+                pkt_size = float(row[3])
+                persistence = int(row[4])
+                status = row[5]
 
-                last_alert = alert_history.get(ip_address, 0)
+                current_cycle_ips.add(ip)
+                pps_formated = f"{int(pps):,}"
+                bps_formated = format_bps(bps)
 
-                if (current_ts - last_alert) > ALERT_COOLDOWN:
-                    # Construimos el mensaje usando etiquetas HTML <b> y <code>
-                    # Esto evita que 'Critical_Anomaly' rompa el formato.
-                    msg = (
-                        f"🚨 <b>ALERTA DE SEGURIDAD</b> 🚨\n\n"
-                        f"<b>IP:</b> <code>{ip_address}</code>\n"
-                        f"<b>Tipo:</b> {attack_type}\n"
-                        f"<b>Intensidad:</b> {max_pps:,.0f} PPS\n"
-                        f"<b>Ancho de Banda:</b> {max_bw}\n"
-                        f"<b>Persistencia:</b> {hits} detecciones en 60s\n"
-                    )
-                    
-                    print(f"[ALERTA] Enviando telegram por {ip_address}...")
-                    send_telegram_alert(msg)
-                    alert_history[ip_address] = current_ts
+                # -------------------------------------------------------
+                # CASO 1: YA ES UN ATAQUE ACTIVO (Confirmado previamente)
+                # -------------------------------------------------------
+                if ip in active_attacks:
+                    # Solo actualizamos datos
+                    active_attacks[ip]['last_seen'] = time.time()
+                    if pps > active_attacks[ip]['max_pps']:
+                        active_attacks[ip]['max_pps'] = pps
+
+                # -------------------------------------------------------
+                # CASO 2: ES UN CANDIDATO (Verificando racha)
+                # -------------------------------------------------------
                 else:
-                    print(f"[SILENCIO] Cooldown activo para {ip_address}")
+                    # Si no estaba en pendientes, lo agregamos con contador 1
+                    if ip not in pending_attacks:
+                        pending_attacks[ip] = 1
+                        print(f"👀 Ojo puesto en {ip} (Racha: 1/{MIN_STREAK})")
+                    else:
+                        # Si ya estaba, sumamos 1
+                        pending_attacks[ip] += 1
+                        print(f"👀 Verificando {ip} (Racha: {pending_attacks[ip]}/{MIN_STREAK})")
 
-            # Limpieza de cache
-            for ip in list(alert_history.keys()):
-                if (current_ts - alert_history[ip]) > (ALERT_COOLDOWN * 2):
-                    del alert_history[ip]
+                    # ¿Llegamos a la meta de 3 veces?
+                    if pending_attacks[ip] >= MIN_STREAK:
+                        # ¡CONFIRMADO! Promover a Activo y Alertar
+                        active_attacks[ip] = {
+                            'start_time': time.time(),
+                            'last_seen': time.time(),
+                            'max_pps': pps,
+                            'status': status
+                        }
+                        
+                        # Borramos de pendientes porque ya es oficial
+                        del pending_attacks[ip]
+                        
+                        msg = (
+                            f"<b>💀 ATAQUE CONFIRMADO (Verificado {MIN_STREAK}x)</b>\n\n"
+                            f"<b>Target:</b> {ip}\n"
+                            f"<b>Estado:</b> {status}\n"
+                            f"<b>PPS:</b> {pps_formated}\n"
+                            f"<b>Tráfico:</b> {bps_formated}\n"
+                            f"<b>Persistencia:</b> {persistence} min"
+                        )
+                        print(f"🚨 ALERT SENT: {ip}")
+                        send_telegram_msg(msg)
+
+            # -------------------------------------------------------
+            # LIMPIEZA DE PENDIENTES (Romper la racha)
+            # -------------------------------------------------------
+            # Si una IP estaba pendiente pero NO apareció en esta vuelta, reseteamos su contador
+            pending_ips_to_remove = []
+            for ip in pending_attacks:
+                if ip not in current_cycle_ips:
+                    print(f"♻️ Racha rota para {ip}. Reseteando.")
+                    pending_ips_to_remove.append(ip)
+            
+            for ip in pending_ips_to_remove:
+                del pending_attacks[ip]
+
+            # -------------------------------------------------------
+            # LIMPIEZA DE ACTIVOS (Fin del ataque)
+            # -------------------------------------------------------
+            active_ips_to_remove = []
+            for ip, data in active_attacks.items():
+                if ip not in current_cycle_ips:
+                    if time.time() - data['last_seen'] > COOLDOWN_SECONDS:
+                        
+                        duration = int(time.time() - data['start_time'] - COOLDOWN_SECONDS + 300)
+                        if duration < 0: duration = 0
+                        
+                        msg = (
+                            f"<b>✅ FIN DEL ATAQUE</b>\n\n"
+                            f"<b>Target:</b> {ip}\n"
+                            f"<b>Duración Aprox:</b> {duration} seg\n"
+                            f"<b>Pico PPS:</b> {int(data['max_pps']):,}"
+                        )
+                        send_telegram_msg(msg)
+                        active_ips_to_remove.append(ip)
+
+            for ip in active_ips_to_remove:
+                del active_attacks[ip]
 
         except Exception as e:
-            # Error de conexión o ejecución, esperamos un poco
-            pass 
+            print(f"Error loop: {e}")
 
-        elapsed = time.time() - start_time
-        time.sleep(max(0, CHECK_INTERVAL - elapsed))
+        time.sleep(CHECK_INTERVAL)
 
 if __name__ == '__main__':
     main()

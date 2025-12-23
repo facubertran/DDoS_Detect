@@ -58,3 +58,26 @@ Check the calculated rates:
 ```sql
 SELECT * FROM v_ddos_detection;
 ```
+
+## 7. Verify Attakers
+```sql
+SELECT 
+    src_ip, 
+    status, 
+    
+    -- Comparativa visual
+    current_pps, 
+    round(avg_pps) as pps_promedio,
+    
+    z_score, 
+    formatReadableSize(current_bps) as ancho_banda
+FROM default.view_ddos_baseline_optimized
+ORDER BY z_score DESC
+```
+
+## 10s
+```sql
+SELECT * FROM default.flow_metrics_10s 
+WHERE src_ip = '99.99.99.99' 
+LIMIT 100
+```
