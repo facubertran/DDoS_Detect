@@ -75,7 +75,7 @@ clickhouse client -n <<-EOSQL
     ) ENGINE = MergeTree()
     PARTITION BY date
     ORDER BY time_received_ns
-    TTL date + INTERVAL 1 DAY;
+    TTL date + INTERVAL 6 HOUR;
 
     CREATE MATERIALIZED VIEW IF NOT EXISTS flows_raw_view TO flows_raw
     AS SELECT
