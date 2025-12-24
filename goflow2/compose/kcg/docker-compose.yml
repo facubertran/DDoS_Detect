@@ -74,5 +74,9 @@ services:
       # the following files have 101:101 as owner
       - ./clickhouse/flow.proto:/var/lib/clickhouse/format_schemas/flow.proto
       - ./clickhouse/protocols.csv:/var/lib/clickhouse/user_files/protocols.csv
+      - clickhouse_data:/var/lib/clickhouse
     depends_on:
       - kafka
+
+volumes:
+  clickhouse_data:

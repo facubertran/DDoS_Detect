@@ -75,7 +75,7 @@ clickhouse client -n <<-EOSQL
     ) ENGINE = MergeTree()
     PARTITION BY date
     ORDER BY time_received_ns
-    TTL date + INTERVAL 1 DAY;
+    TTL date + INTERVAL 6 HOUR;
 
     CREATE MATERIALIZED VIEW IF NOT EXISTS flows_raw_view TO flows_raw
     AS SELECT
@@ -124,7 +124,7 @@ clickhouse client -n <<-EOSQL
     ) ENGINE = SummingMergeTree()
     PARTITION BY date
     ORDER BY (date, timeslot, src_as, dst_as, \`etypeMap.etype\`)
-    TTL date + INTERVAL 1 DAY;
+    TTL date + INTERVAL 6 HOUR;
 
     CREATE MATERIALIZED VIEW IF NOT EXISTS flows_5m_view TO flows_5m
     AS
